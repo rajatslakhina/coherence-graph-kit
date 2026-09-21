@@ -75,6 +75,15 @@ public enum CoherenceError: Error, Equatable, CustomStringConvertible {
     case domainAlreadyOwned(domain: Domain, owner: Stack)
     /// A transfer was attempted for a domain nobody owns.
     case domainNotOwned(domain: Domain)
+    /// A write was attempted against a derived node.
+    ///
+    /// A derived value is a function of its inputs. Writing one directly
+    /// produces a state no input could have produced, and the topological walk
+    /// will not correct it — the node's own inputs did not change, so it is
+    /// not recomputed, and the fabricated value propagates downward and is
+    /// published. `derived` and `source` return the same `Node<V>` type, so
+    /// the type system cannot catch this; the engine does.
+    case notASource(NodeID)
     /// The handle was not vended by this engine, or its index is out of range.
     case unknownNode(NodeID)
 
@@ -90,6 +99,8 @@ public enum CoherenceError: Error, Equatable, CustomStringConvertible {
             return "'\(domain)' is already owned by \(owner)"
         case .domainNotOwned(let domain):
             return "'\(domain)' is not owned by any stack, so there is nothing to transfer"
+        case .notASource(let id):
+            return "node \(id) is derived; write its inputs instead"
         case .unknownNode(let id):
             return "node \(id) was not vended by this engine"
         }

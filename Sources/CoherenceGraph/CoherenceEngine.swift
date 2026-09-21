@@ -310,6 +310,14 @@ public final class CoherenceEngine {
         from stack: Stack? = nil
     ) throws {
         guard let rec = record(node.id) else { throw CoherenceError.unknownNode(node.id) }
+        // A derived value is a function of its inputs. Writing one directly
+        // survives the transaction — step 4 only recomputes a node when one of
+        // *its* inputs changed, and nothing upstream did — so the fabricated
+        // value propagates downward and is published, then silently self-heals
+        // the next time a real source moves. That is precisely the
+        // settles-correctly-afterwards failure this package exists to remove,
+        // so it is refused rather than tolerated.
+        guard rec.recompute == nil else { throw CoherenceError.notASource(node.id) }
         if let domain = rec.domain, let stack {
             try ownership.validateWrite(to: domain, by: stack)
         }
@@ -327,6 +335,24 @@ public final class CoherenceEngine {
         try set(newValue, for: node, from: stack)
         return try commit()
     }
+
+    /// Drops every staged write without committing.
+    ///
+    /// Staging several values and committing once is the batching path, but a
+    /// `set` that throws part-way leaves the earlier writes staged, and
+    /// without this they would land on the *next* commit — an atomicity
+    /// guarantee that holds inside a transaction and not around one. Callers
+    /// that abandon a batch call this.
+    @discardableResult
+    public func discardStagedWrites() -> Int {
+        let dropped = dirty.count
+        dirty.removeAll()
+        pendingWrites.removeAll()
+        return dropped
+    }
+
+    /// How many writes are staged and not yet committed.
+    public var stagedWriteCount: Int { dirty.count }
 
     /// Claims a domain for a stack on this engine's registry.
     public func claimDomain(_ domain: Domain, for stack: Stack) throws {
@@ -350,7 +376,8 @@ public final class CoherenceEngine {
     /// the test suite can build a real cycle and prove the branch detects it
     /// and rolls back. It is not public and is never called in normal use.
     func unsafeAddEdgeForAuditing(from source: NodeID, to dependent: NodeID) {
-        guard nodes.indices.contains(source.rawValue),
+        guard source.engine == identity, dependent.engine == identity,
+              nodes.indices.contains(source.rawValue),
               nodes.indices.contains(dependent.rawValue) else { return }
         // Both halves of the edge. Appending only to `dependents` would make
         // the cone reachable but leave the in-degree unchanged, and Kahn's
@@ -366,6 +393,22 @@ public final class CoherenceEngine {
     public func addSink(_ sink: any CoherenceSink) {
         sinks.append(WeakSink(sink: sink))
     }
+
+    /// Detaches a sink.
+    ///
+    /// Weak references mean a deallocated sink stops being notified on its
+    /// own, but a sink that is still alive and merely no longer interested had
+    /// no way to leave — which is the kind of slow leak a long-lived store
+    /// accumulates one screen at a time.
+    @discardableResult
+    public func removeSink(_ sink: any CoherenceSink) -> Bool {
+        let before = sinks.count
+        sinks.removeAll { $0.sink == nil || $0.sink === sink }
+        return sinks.count < before
+    }
+
+    /// Number of live registered sinks.
+    public var sinkCount: Int { sinks.filter { $0.sink != nil }.count }
 
     // MARK: - Commit
 

@@ -151,6 +151,34 @@ public enum NaiveDiamond: DiamondScenario {
     }
 }
 
+extension GraphState {
+    /// Rebuilds the states an observer of `apex` was shown, from a
+    /// `NaivePropagator` update log.
+    ///
+    /// Lives here rather than in the view model so the test suite exercises
+    /// the *same* function the UI calls. A test that re-implements the
+    /// reconstruction inline proves only that the test author can write it
+    /// twice.
+    public static func statesObservedAtApex(
+        in updates: [NaivePropagator.Update],
+        cart: Int,
+        subtotal: Int,
+        tax: Int,
+        apex: Int
+    ) -> [GraphState] {
+        updates
+            .filter { $0.index == apex }
+            .map { update in
+                GraphState(
+                    cart: update.value(at: cart) ?? 0,
+                    subtotal: update.value(at: subtotal) ?? 0,
+                    tax: update.value(at: tax) ?? 0,
+                    total: update.value(at: apex) ?? 0
+                )
+            }
+    }
+}
+
 /// Result of one executed invariant.
 public struct AuditFinding: Sendable, Equatable, CustomStringConvertible {
     public let invariant: String
@@ -300,7 +328,7 @@ public enum GraphAudit {
             // counter starting at 1 would collide with that first write, the
             // engine would correctly treat it as a no-op, and the cascade would
             // settle — making this check silently prove nothing.
-            try? engine.set(counter + 1_000, for: ping)
+            try? engine.set(Saturating.add(counter, 1_000), for: ping)
         }
         engine.addSink(oscillator)
 

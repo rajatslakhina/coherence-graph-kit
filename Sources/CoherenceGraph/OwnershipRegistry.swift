@@ -68,6 +68,11 @@ public struct OwnershipRegistry: Sendable, Equatable {
         }
         owners[domain] = to
         history.append(Transfer(domain: domain, from: from, to: to))
+        // Bounded: the demo renders this list, and an unbounded array behind a
+        // button a user can hold down is a leak with a UI attached.
+        if history.count > Self.historyLimit {
+            history.removeFirst(history.count - Self.historyLimit)
+        }
     }
 
     /// One recorded ownership move.
@@ -78,9 +83,12 @@ public struct OwnershipRegistry: Sendable, Equatable {
         public var description: String { "\(domain): \(from) -> \(to)" }
     }
 
-    /// Every transfer, oldest first. A migration you cannot audit afterwards
-    /// is a migration nobody can tell you the state of.
+    /// Most recent transfers, oldest first. A migration you cannot audit
+    /// afterwards is a migration nobody can tell you the state of.
     public private(set) var history: [Transfer] = []
+
+    /// Maximum retained transfers.
+    public static let historyLimit = 128
 
     /// Every claimed domain, sorted by name for stable display and diffing.
     public var claims: [(domain: Domain, owner: Stack)] {

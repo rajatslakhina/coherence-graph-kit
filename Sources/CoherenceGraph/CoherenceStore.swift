@@ -50,16 +50,22 @@ public final class CoherenceStore {
     /// Commits everything staged so far as one transaction.
     @discardableResult
     public func commit() throws -> CoherenceSnapshot? {
-        let snapshot = try engine.commit()
-        // Replaying `snapshotsFromLastCommit` rather than firing once with the
-        // return value: `engine.commit()` runs the whole cascade and returns
-        // only the final snapshot, so a facade that forwarded just that would
-        // hide every intermediate publication.
-        for published in engine.snapshotsFromLastCommit {
-            onCommit?(published)
+        // `defer`, not a plain loop after the call: a cascade that exceeds the
+        // budget throws *after* several transactions have already been
+        // published to engine-registered sinks. Forwarding only on the success
+        // path would mean `onCommit` subscribers silently missed publications
+        // that other observers saw.
+        defer {
+            for published in engine.snapshotsFromLastCommit {
+                onCommit?(published)
+            }
         }
-        return snapshot
+        return try engine.commit()
     }
+
+    /// Drops every staged write without committing.
+    @discardableResult
+    public func discardStagedWrites() -> Int { engine.discardStagedWrites() }
 
     /// Reads a node, falling back for a handle this engine did not vend.
     public func value<V: Equatable & Sendable>(of node: Node<V>, default fallback: V) -> V {
