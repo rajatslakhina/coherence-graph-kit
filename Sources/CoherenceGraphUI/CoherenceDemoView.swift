@@ -70,14 +70,14 @@ public struct CoherenceDemoView: View {
                         .font(.title2)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.cart <= 0)
+                .disabled(model.cart <= Self.quantityBounds.lowerBound)
 
                 Slider(
                     value: Binding(
                         get: { Double(model.cart) },
-                        set: { model.setCart(Self.quantity(fromSlider: $0)) }
+                        set: { model.setCart(Quantity.fromSlider($0, bounds: Self.quantityBounds)) }
                     ),
-                    in: 0...99,
+                    in: Double(Self.quantityBounds.lowerBound)...Double(Self.quantityBounds.upperBound),
                     step: 1
                 )
                 .accessibilityLabel("Quantity")
@@ -90,7 +90,7 @@ public struct CoherenceDemoView: View {
                         .font(.title2)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.cart >= 99)
+                .disabled(model.cart >= Self.quantityBounds.upperBound)
             }
         }
     }
@@ -101,13 +101,18 @@ public struct CoherenceDemoView: View {
                 title: "Depth-first push",
                 subtitle: "NaivePropagator",
                 states: model.lastWriteNaive,
-                accent: .red
+                accent: .red,
+                emptyNote: "No write yet."
             )
             panel(
                 title: "Ordered commit",
                 subtitle: "CoherenceEngine",
                 states: model.lastWriteCoherent,
-                accent: .green
+                accent: .green,
+                emptyNote: model.lastWriteWasNoOp
+                    ? "Nothing published: the value did not change. That is the minimal-publish "
+                        + "guarantee — note that the naive panel republished anyway."
+                    : "No write yet."
             )
         }
     }
@@ -116,7 +121,8 @@ public struct CoherenceDemoView: View {
         title: String,
         subtitle: String,
         states: [GraphState],
-        accent: Color
+        accent: Color,
+        emptyNote: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
@@ -136,9 +142,10 @@ public struct CoherenceDemoView: View {
             }
 
             if states.isEmpty {
-                Text("No write yet.")
+                Text(emptyNote)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(spacing: 6) {
                     ForEach(Array(states.enumerated()), id: \.offset) { pair in
@@ -161,7 +168,7 @@ public struct CoherenceDemoView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 if incoherent {
-                    Label("cart never had this state", systemImage: "exclamationmark.triangle.fill")
+                    Label("never a real cart", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.red)
                 }
@@ -173,6 +180,13 @@ public struct CoherenceDemoView: View {
                 Spacer()
                 amount("total", observation.total)
             }
+            // The source value is the whole tell. Without it the row reads as
+            // perfectly consistent — 2500 + 80 really does equal 2580 — and
+            // the only signal of a bug is a red badge asserting one.
+            Text(observation.sourceNarrative)
+                .font(.caption2)
+                .foregroundStyle(incoherent ? .red : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(10)
         .background(
@@ -186,7 +200,7 @@ public struct CoherenceDemoView: View {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text(Self.money(cents))
+            Text(Money.format(cents: cents))
                 .font(.subheadline.monospacedDigit().weight(.medium))
         }
     }
@@ -196,16 +210,34 @@ public struct CoherenceDemoView: View {
             Text("Single-writer ownership")
                 .font(.headline)
             Text(
-                "The cart domain is owned by SwiftUI. A write attributed to the "
-                + "legacy UIKit stack is refused, so \"two sources of truth\" is a "
-                + "compile-time-shaped error rather than a convention."
+                "The cart domain is owned by \(model.cartOwner.description). A write "
+                + "attributed to the other stack is refused, so \"two sources of truth\" is a "
+                + "typed error rather than a convention. Migration is the other verb: a domain "
+                + "is handed over deliberately, one at a time, and every move is recorded."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)
-            Button("Attempt a write from the legacy stack") {
-                model.attemptRogueWrite()
+            HStack(spacing: 10) {
+                Button("Write as \(model.nonOwningStack.description)") {
+                    model.attemptRogueWrite()
+                }
+                .buttonStyle(.bordered)
+                Button("Migrate to \(model.nonOwningStack.description)") {
+                    model.migrateCartDomain()
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.bordered)
+            if !model.transfers.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Transfer history")
+                        .font(.caption.weight(.semibold))
+                    ForEach(Array(model.transfers.enumerated()), id: \.offset) { pair in
+                        Text("\(pair.offset + 1). \(pair.element.description)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
             if let error = model.lastError {
                 Text(error)
                     .font(.caption.monospaced())
@@ -272,30 +304,10 @@ public struct CoherenceDemoView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Formatting
+    // MARK: - Constants
 
-    /// Slider position to a quantity.
-    ///
-    /// `Int(someDouble)` traps on NaN, on infinity, and on anything outside
-    /// `Int`'s range. A `Slider` bound to `0...99` should never produce those,
-    /// but "should never" is not a guarantee the runtime enforces, and this is
-    /// a conversion on a value the view does not compute itself.
-    static func quantity(fromSlider value: Double) -> Int {
-        guard value.isFinite else { return 0 }
-        let rounded = value.rounded()
-        if rounded <= 0 { return 0 }
-        if rounded >= 99 { return 99 }
-        return Int(rounded)
-    }
-
-    /// Cents to a display string, without trapping on `Int.min`.
-    static func money(_ cents: Int) -> String {
-        let dollars = Saturating.divide(cents, 100)
-        let rawRemainder = Saturating.remainder(cents, 100)
-        // `abs(Int.min)` traps; subtract from zero through the guarded helper.
-        let remainder = rawRemainder < 0 ? Saturating.subtract(0, rawRemainder) : rawRemainder
-        return "$\(dollars).\(remainder < 10 ? "0" : "")\(remainder)"
-    }
+    /// Range the quantity control is bound to.
+    static let quantityBounds = 0...99
 }
 
 #Preview {

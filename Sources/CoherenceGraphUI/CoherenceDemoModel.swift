@@ -27,6 +27,22 @@ public final class CoherenceDemoModel {
     /// Set when a commit throws, so failures are shown rather than swallowed.
     public private(set) var lastError: String?
 
+    /// True when the last write was equal to the current value, so the
+    /// coherent engine published nothing at all.
+    ///
+    /// Without this the panels invert: the naive propagator has no equality
+    /// pruning and republishes regardless, so a no-op write would show two
+    /// states on the left and an empty panel on the right — the screen saying
+    /// the opposite of the argument. Naming the case turns it into a
+    /// demonstration of the "minimal publish" guarantee instead.
+    public private(set) var lastWriteWasNoOp = false
+
+    /// Recorded ownership moves, newest last.
+    public private(set) var transfers: [OwnershipRegistry.Transfer] = []
+
+    /// Which stack currently owns the cart domain.
+    public private(set) var cartOwner: Stack = .swiftUI
+
     public private(set) var cart: Int
 
     private let store: CoherenceStore
@@ -107,10 +123,12 @@ public final class CoherenceDemoModel {
         let clamped = max(0, min(newValue, 99))
         cart = clamped
         lastError = nil
+        lastWriteWasNoOp = false
         lastWriteCoherent.removeAll(keepingCapacity: true)
         lastWriteNaive.removeAll(keepingCapacity: true)
         do {
-            try store.write(clamped, to: cartNode, from: .swiftUI)
+            let snapshot = try store.write(clamped, to: cartNode, from: cartOwner)
+            lastWriteWasNoOp = (snapshot == nil)
         } catch {
             lastError = String(describing: error)
         }
@@ -122,12 +140,32 @@ public final class CoherenceDemoModel {
     public func increment() { setCart(Saturating.add(cart, 1)) }
     public func decrement() { setCart(Saturating.subtract(cart, 1)) }
 
+    /// The stack that does *not* currently own the cart domain.
+    public var nonOwningStack: Stack { cartOwner == .swiftUI ? .legacyUIKit : .swiftUI }
+
     /// Demonstrates single-writer ownership by attempting a write from the
     /// stack that does not own the cart domain.
     public func attemptRogueWrite() {
         do {
-            try store.write(cart + 1, to: cartNode, from: .legacyUIKit)
-            lastError = "unexpected: the rogue write was accepted"
+            // Saturating, not `cart + 1`: the README claims every operation
+            // that can trap goes through this seam, and a plain `+` in
+            // shipping library code would make that claim false.
+            try store.write(Saturating.add(cart, 1), to: cartNode, from: nonOwningStack)
+            lastError = "unexpected: the write from \(nonOwningStack) was accepted"
+        } catch {
+            lastError = String(describing: error)
+        }
+    }
+
+    /// Hands the cart domain to the other stack — the move a migration is
+    /// actually made of, one domain at a time.
+    public func migrateCartDomain() {
+        let target = nonOwningStack
+        do {
+            try store.engine.transferDomain(Self.cartDomain, from: cartOwner, to: target)
+            cartOwner = target
+            transfers = store.engine.ownership.history
+            lastError = nil
         } catch {
             lastError = String(describing: error)
         }
