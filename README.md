@@ -46,8 +46,9 @@ That is the Engineering-Lead-shaped problem here. It is not "adopt Observation."
 | **Exactly-once recompute** | A diamond apex is recomputed once per transaction, not twice | Kahn's algorithm over the dirty cone |
 | **Atomicity** | A transaction that fails restores every value it touched and publishes nothing | Pre-write rollback capture |
 | **Minimal publish** | A node recomputed to an equal value is not reported changed and does not dirty its dependents | Equality pruning inside the topological walk |
+| **Derived values are read-only** | Writing a derived node is a typed error, not a value that survives the transaction and self-heals later | `CoherenceError.notASource` |
 | **Bounded re-entrancy** | A sink that writes during publish is sequenced, not recursed; an oscillating pair fails loudly | `isPublishing` gate + cascade budget |
-| **Single-writer ownership** | A state domain has exactly one owning stack; the other gets a typed error | `OwnershipRegistry` |
+| **Single-writer ownership** | A *source* domain has exactly one owning stack; the other gets a typed error. Derived nodes are unwritable by anyone, so there is no side door | `OwnershipRegistry` |
 
 ## Design decisions, and what was rejected
 
@@ -119,28 +120,39 @@ engine.value(of: total)               // Optional(2700) — and no observer ever
 Batching several writes into one publish:
 
 ```swift
-let taxRate = engine.source(8, label: "taxRate")          // percent, in whole points
-let tax     = engine.derived(cart, taxRate, label: "tax") { Saturating.multiply($0, $1) }
+// Continuing the graph above. `taxRate` is tax in cents per unit, so the
+// derived value is a multiplication and not a percentage.
+let taxRate  = engine.source(8, label: "taxRate")
+let tax2     = engine.derived(cart, taxRate, label: "tax2") { Saturating.multiply($0, $1) }
 
 try engine.set(25, for: cart)
 try engine.set(9, for: taxRate)
 try engine.commit()                   // one recompute pass, one notification
+engine.value(of: tax2)                // Optional(225)
+
+// Abandoning a batch rather than letting it land on the next commit:
+try engine.set(50, for: cart)
+engine.discardStagedWrites()
 ```
 
 Declaring a single writer during a migration:
 
 ```swift
-try engine.claimDomain(Domain("cart"), for: .swiftUI)
-let cart = engine.source(10, domain: Domain("cart"), label: "cart")
+let migrating = CoherenceEngine()
+try migrating.claimDomain(Domain("cart"), for: .swiftUI)
+let owned = migrating.source(10, domain: Domain("cart"), label: "cart")
 
-try engine.set(1, for: cart, from: .legacyUIKit)
+try migrating.set(1, for: owned, from: .legacyUIKit)
 // throws .ownershipViolation(domain: cart, owner: SwiftUI, attemptedBy: legacy UIKit)
+
+// And when the migration reaches this domain, it moves deliberately:
+try migrating.transferDomain(Domain("cart"), from: .swiftUI, to: .legacyUIKit)
 ```
 
 ### Installation
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/coherence-graph-kit.git", from: "2.0.0")
+.package(url: "https://github.com/rajatslakhina/coherence-graph-kit.git", from: "3.0.0")
 ```
 
 ### Running it yourself
@@ -148,8 +160,8 @@ try engine.set(1, for: cart, from: .legacyUIKit)
 ```bash
 git clone https://github.com/rajatslakhina/coherence-graph-kit.git
 cd coherence-graph-kit
-rm -rf .build && swift build -Xswiftc -warnings-as-errors   # zero warnings
-swift test                                                   # 69 tests
+rm -rf .build && swift build -Xswiftc -warnings-as-errors   # zero warnings (CoherenceGraph)
+swift test                                                   # 81 tests
 swift test --filter testPrintAuditReport                     # prints the block above
 ```
 
@@ -163,8 +175,8 @@ This repository deliberately contains **no app target of any kind** — no execu
 
 ## Verification
 
-- **Clean `swift build -Xswiftc -warnings-as-errors`, zero warnings.** `.build` is removed first, because `swift build` on an up-to-date tree compiles nothing and still prints "Build complete!" — which is evidence of nothing. The claim is machine-enforced in CI, not asserted here.
-- **69 XCTest tests, 0 failures** on Swift 6.0.3.
+- **Clean `swift build -Xswiftc -warnings-as-errors`, zero warnings** on Linux, where `CoherenceGraph` compiles. `CoherenceGraphUI` sits inside `#if canImport(SwiftUI)` and compiles to nothing there, so that flag never saw a line of it — the macOS job and the demo app's job therefore pass `SWIFT_TREAT_WARNINGS_AS_ERRORS=YES` to `xcodebuild`, which is what makes the claim cover the whole package rather than half of it. `.build` is removed first, because `swift build` on an up-to-date tree compiles nothing and still prints "Build complete!" — which is evidence of nothing. The claim is machine-enforced in CI, not asserted here.
+- **81 XCTest tests, 0 failures** on Swift 6.0.3.
 - **CI: [Actions](https://github.com/rajatslakhina/coherence-graph-kit/actions).** The Linux job re-runs the clean warnings-as-errors build, builds the tests under the same flag, and runs the suite. The macOS job compiles **every** scheme for `generic/platform=iOS Simulator` — and that job is load-bearing rather than tidy, because `CoherenceGraphUI` sits entirely inside `#if canImport(SwiftUI)` and the Linux job therefore compiles none of it. The scheme count is checked explicitly: a `while read` over an empty list exits 0, and a green job that built nothing is worse than a red one.
 - **The app was never run on a Simulator, and no screenshots exist in either repository.** This package was built by an unattended scheduled job that is refused interactive control of the machine. "Compiles for an iOS Simulator destination" is not "ran on a Simulator," and nothing here claims it is.
 
@@ -180,11 +192,22 @@ Naming the edges is part of the design, not an apology for it.
 
 **No node teardown.** `CoherenceEngine.nodes` only grows; there is no `remove` or `reset`. That is fine for a graph built once at startup and wrong for the thing this README pitches — a long-lived store that screens register derived nodes against as they appear. Adding removal means deciding what happens to a dependent of a removed node, which is a real design question (cascade? orphan? refuse?) and not one to answer by accident. Until it is answered, build graphs whose node set is fixed.
 
+Sinks *can* be detached (`removeSink(_:)`), and staged writes can be abandoned (`discardStagedWrites()`) — those were the two lifecycle gaps that had no answer at all, as opposed to one that needs a design decision.
+
 **No UIKit in this repository.** The migration argument is about two propagation engines over one source of truth, and `NaivePropagator` stands in for the legacy one. It is a faithful model of the *propagation* defect — it is not a UIKit view hierarchy, and nothing here renders from UIKit. The "same frame, two answers" scenario is therefore reasoned about here and demonstrated only in the propagation layer.
 
 **No scale claims.** The worked example is four nodes. Commit is `O(affected + edges)` over the dirty cone, which is the right shape, but nothing in this repository benchmarks a large graph, so there is no performance claim to quote.
 
 **Ownership transfer is manual and single-step.** `transfer(_:from:to:)` moves one domain and records it. There is no notion of a staged rollout, a percentage, or an automatic rollback — a migration is a sequence of deliberate human decisions here, and the registry's job is only to make each one explicit and auditable.
+
+## How this got here
+
+Two independent reviews were run against this package before it was tagged, each by a reviewer with no memory of building it. Each found a soundness hole reachable from the public API:
+
+- The first: a `Node` handle from a *different* engine with an in-range index was accepted, writing into an unrelated node and silently corrupting the graph. Fixed by stamping engine identity into `NodeID` (v2.0.0).
+- The second, worse because it needed no misuse at all: `set` accepted a **derived** node. The write survived the transaction — the node's own inputs had not changed, so it was never recomputed — and the fabricated value propagated downward and was published, then self-healed on the next real source write. That is precisely the settles-correctly-afterwards shape this README opens by describing. Fixed by `CoherenceError.notASource` (v3.0.0).
+
+Both reviews also found tests that read like coverage and passed against gutted implementations. The version history is the record of that, not noise in spite of it.
 
 ## License
 
