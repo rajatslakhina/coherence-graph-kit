@@ -72,21 +72,25 @@ final class GraphAuditTests: XCTestCase {
         XCTAssertEqual(GraphAudit.expectedInvariants, expected)
     }
 
-    func testObservationCoherenceUsesGuardedArithmetic() {
-        // A total that would overflow must not trap while deciding coherence.
-        // cart * 100 and cart * 8 both overflow here; deciding coherence must
-        // clamp rather than trap.
-        let cart = Int.max
-        let observation = GraphState(
-            cart: cart,
-            subtotal: Saturating.multiply(cart, GraphState.unitPrice),
-            tax: Saturating.multiply(cart, GraphState.unitTax),
-            total: Saturating.add(
-                Saturating.multiply(cart, GraphState.unitPrice),
-                Saturating.multiply(cart, GraphState.unitTax)
-            )
-        )
-        XCTAssertTrue(observation.isCoherent)
+    func testCoherenceCheckClampsInsteadOfTrappingAtTheExtreme() {
+        // The version this replaces built its expected state with the same
+        // `Saturating` calls `isCoherent` uses to check it — X == X, three
+        // times, and it passed against `Saturating.multiply { _,_ in 0 }`.
+        // Assert the concrete clamped constants instead.
+        XCTAssertEqual(Saturating.multiply(Int.max, GraphState.unitPrice), Int.max)
+        XCTAssertEqual(Saturating.multiply(Int.max, GraphState.unitTax), Int.max)
+        XCTAssertEqual(Saturating.add(Int.max, Int.max), Int.max)
+        XCTAssertTrue(GraphState(cart: .max, subtotal: .max, tax: .max, total: .max).isCoherent)
+    }
+
+    func testCoherenceCheckRejectsAStateThatDoesNotMatchItsSource() {
+        // The apex adds up (2500 + 80 == 2580) while `tax` came from a
+        // different cart. `isCoherent` must still say no, or the headline
+        // check is decoration.
+        let glitched = GraphState(cart: 25, subtotal: 2500, tax: 80, total: 2580)
+        XCTAssertEqual(Saturating.add(glitched.subtotal, glitched.tax), glitched.total)
+        XCTAssertFalse(glitched.isCoherent)
+        XCTAssertTrue(GraphState(cart: 25, subtotal: 2500, tax: 200, total: 2700).isCoherent)
     }
 }
 
@@ -114,7 +118,22 @@ final class GraphStateNarrativeTests: XCTestCase {
     }
 
     func testNarrativeDoesNotTrapOnExtremeValues() {
-        let extreme = GraphState(cart: Int.min, subtotal: Int.min, tax: Int.min, total: Int.min)
-        XCTAssertFalse(extreme.sourceNarrative.isEmpty)
+        // `Int.min / 100` and `Int.min / 8` both route through `Saturating`.
+        // Note the state is genuinely *coherent* at this extreme: every
+        // saturating operation clamps to `Int.min`, so the relation holds.
+        // That is worth asserting rather than assuming it must be broken.
+        let extreme = GraphState(cart: .min, subtotal: .min, tax: .min, total: .min)
+        XCTAssertTrue(extreme.isCoherent)
+        XCTAssertEqual(extreme.sourceNarrative, "every value computed from quantity \(Int.min)")
+        XCTAssertEqual(extreme.subtotalSource, Saturating.divide(Int.min, GraphState.unitPrice))
+        XCTAssertEqual(extreme.taxSource, Saturating.divide(Int.min, GraphState.unitTax))
+    }
+
+    func testNarrativeReportsDisagreementAtExtremeValuesToo() {
+        // Asserting only `!isEmpty` would pass against `return "x"`.
+        let mixed = GraphState(cart: .min, subtotal: 0, tax: .min, total: .min)
+        XCTAssertFalse(mixed.isCoherent)
+        XCTAssertTrue(mixed.sourceNarrative.contains("the two branches disagree"))
+        XCTAssertTrue(mixed.sourceNarrative.contains("\(Int.min)"))
     }
 }

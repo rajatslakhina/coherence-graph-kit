@@ -25,20 +25,20 @@ final class UpdateLogTests: XCTestCase {
         return (graph, cart, subtotal, tax, total)
     }
 
-    /// Exactly what `CoherenceDemoModel.drainNaiveLog()` does.
+    /// Calls the shared core function the view model uses, rather than a
+    /// second copy of it. An earlier version re-implemented the
+    /// reconstruction inline, which proved only that it could be written
+    /// twice — gutting `statesObservedAtApex` left every test green.
     private func statesObservedAtApex(
         _ d: (graph: NaivePropagator, cart: Int, subtotal: Int, tax: Int, total: Int)
     ) -> [GraphState] {
-        d.graph.updateLog
-            .filter { $0.index == d.total }
-            .map { update in
-                GraphState(
-                    cart: update.value(at: d.cart) ?? 0,
-                    subtotal: update.value(at: d.subtotal) ?? 0,
-                    tax: update.value(at: d.tax) ?? 0,
-                    total: update.value(at: d.total) ?? 0
-                )
-            }
+        GraphState.statesObservedAtApex(
+            in: d.graph.updateLog,
+            cart: d.cart,
+            subtotal: d.subtotal,
+            tax: d.tax,
+            apex: d.total
+        )
     }
 
     func testUpdateLogSnapshotsPreserveTheIncoherentMoment() {
