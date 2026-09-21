@@ -1,0 +1,177 @@
+#if canImport(SwiftUI)
+import Foundation
+import Observation
+import CoherenceGraph
+
+/// Drives two live graphs side by side over the same input.
+///
+/// Both graphs are real and stateful — this is the library running, not a
+/// replay of a canned scenario. `NaivePropagator` is the implementation almost
+/// every hand-rolled observable layer becomes; `CoherenceEngine` is the one
+/// this package argues for. They are fed identical writes.
+@MainActor
+@Observable
+public final class CoherenceDemoModel {
+
+    /// Every state the coherent engine made visible, newest last.
+    public private(set) var coherentLog: [GraphState] = []
+    /// Every state the naive propagator made visible, newest last.
+    public private(set) var naiveLog: [GraphState] = []
+    /// States published by the most recent write only. This is the comparison
+    /// that matters: one write, two implementations, different numbers of
+    /// observable states.
+    public private(set) var lastWriteCoherent: [GraphState] = []
+    public private(set) var lastWriteNaive: [GraphState] = []
+    /// Executed invariants, refreshed on demand.
+    public private(set) var findings: [AuditFinding] = []
+    /// Set when a commit throws, so failures are shown rather than swallowed.
+    public private(set) var lastError: String?
+
+    public private(set) var cart: Int
+
+    private let store: CoherenceStore
+    private let cartNode: Node<Int>
+    private let subtotalNode: Node<Int>
+    private let taxNode: Node<Int>
+    private let totalNode: Node<Int>
+
+    private let naive = NaivePropagator()
+    private let naiveCart: Int
+    private let naiveSubtotal: Int
+    private let naiveTax: Int
+    private let naiveTotal: Int
+
+    /// The domain whose single writer is declared below.
+    public static let cartDomain = Domain("cart")
+
+    public init(policy: CoherencePolicy, initialCart: Int = 3) {
+        // Clamped so a caller-supplied value can never drive the demo into an
+        // out-of-range stepper state.
+        let seed = max(0, min(initialCart, 99))
+        cart = seed
+
+        store = CoherenceStore(policy: policy)
+        let engine = store.engine
+        // During a migration this slice of state has exactly one writer. A
+        // write attributed to the other stack is rejected — see `attemptRogueWrite`.
+        try? engine.claimDomain(Self.cartDomain, for: .swiftUI)
+        cartNode = engine.source(seed, domain: Self.cartDomain, label: "cart")
+        subtotalNode = engine.derived(cartNode, label: "subtotal") {
+            Saturating.multiply($0, GraphState.unitPrice)
+        }
+        taxNode = engine.derived(cartNode, label: "tax") {
+            Saturating.multiply($0, GraphState.unitTax)
+        }
+        totalNode = engine.derived(subtotalNode, taxNode, label: "total") {
+            Saturating.add($0, $1)
+        }
+
+        naiveCart = naive.source(seed)
+        naiveSubtotal = naive.derived([naiveCart]) {
+            Saturating.multiply($0.first ?? 0, GraphState.unitPrice)
+        }
+        naiveTax = naive.derived([naiveCart]) {
+            Saturating.multiply($0.first ?? 0, GraphState.unitTax)
+        }
+        let apex = naive.derived([naiveSubtotal, naiveTax]) { values in
+            guard values.count == 2 else { return 0 }
+            return Saturating.add(values[0], values[1])
+        }
+        naiveTotal = apex
+
+        store.onCommit = { [weak self] _ in self?.recordCoherent() }
+        // No callback is installed on `naive`: it is not an isolated type, and
+        // handing it a closure that captures this main-actor model is exactly
+        // the cross-isolation capture Swift 6 rejects. Its own snapshot log is
+        // read after each write instead.
+        _ = apex
+
+        findings = GraphAudit.runAll()
+        // Drive one write immediately so both panels show real published
+        // states before the reader touches anything.
+        setCart(seed + 1)
+    }
+
+    /// Current coherent-engine reading.
+    public var current: GraphState {
+        GraphState(
+            cart: store.value(of: cartNode, default: 0),
+            subtotal: store.value(of: subtotalNode, default: 0),
+            tax: store.value(of: taxNode, default: 0),
+            total: store.value(of: totalNode, default: 0)
+        )
+    }
+
+    /// Writes the same value into both graphs.
+    public func setCart(_ newValue: Int) {
+        let clamped = max(0, min(newValue, 99))
+        cart = clamped
+        lastError = nil
+        lastWriteCoherent.removeAll(keepingCapacity: true)
+        lastWriteNaive.removeAll(keepingCapacity: true)
+        do {
+            try store.write(clamped, to: cartNode, from: .swiftUI)
+        } catch {
+            lastError = String(describing: error)
+        }
+        naive.clearUpdateLog()
+        naive.set(clamped, at: naiveCart)
+        drainNaiveLog()
+    }
+
+    public func increment() { setCart(Saturating.add(cart, 1)) }
+    public func decrement() { setCart(Saturating.subtract(cart, 1)) }
+
+    /// Demonstrates single-writer ownership by attempting a write from the
+    /// stack that does not own the cart domain.
+    public func attemptRogueWrite() {
+        do {
+            try store.write(cart + 1, to: cartNode, from: .legacyUIKit)
+            lastError = "unexpected: the rogue write was accepted"
+        } catch {
+            lastError = String(describing: error)
+        }
+    }
+
+    public func refreshAudit() { findings = GraphAudit.runAll() }
+
+    /// True when every real invariant held and the control group still failed.
+    public var auditIsHealthy: Bool { GraphAudit.isHealthy(findings) }
+
+    /// Invariants that are supposed to fail, so the UI can label them honestly
+    /// instead of showing a scary red row.
+    public func isExpectedFailure(_ finding: AuditFinding) -> Bool {
+        GraphAudit.expectedFailures.contains(finding.invariant)
+    }
+
+    private func recordCoherent() {
+        let observation = current
+        coherentLog.append(observation)
+        lastWriteCoherent.append(observation)
+        trim(&coherentLog)
+    }
+
+    /// Turns the propagator's recorded writes into the states an observer of
+    /// the apex would have seen, using each write's own snapshot.
+    private func drainNaiveLog() {
+        for update in naive.updateLog where update.index == naiveTotal {
+            let observation = GraphState(
+                cart: update.value(at: naiveCart) ?? 0,
+                subtotal: update.value(at: naiveSubtotal) ?? 0,
+                tax: update.value(at: naiveTax) ?? 0,
+                total: update.value(at: naiveTotal) ?? 0
+            )
+            naiveLog.append(observation)
+            lastWriteNaive.append(observation)
+        }
+        trim(&naiveLog)
+    }
+
+    /// Bounded: an unbounded log in a long-lived view model is a leak.
+    private func trim(_ log: inout [GraphState]) {
+        let limit = 40
+        guard log.count > limit else { return }
+        log.removeFirst(log.count - limit)
+    }
+}
+#endif
