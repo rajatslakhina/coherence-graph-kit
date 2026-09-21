@@ -120,19 +120,52 @@ final class CoherenceEngineTests: XCTestCase {
         XCTAssertFalse(snapshot?.changed.contains(parity.id) ?? true)
     }
 
-    func testForeignHandleIsRejectedRatherThanCrashing() throws {
+    func testForeignHandleWithAnInRangeIndexIsRejected() throws {
+        // The dangerous case, and the one an earlier version of this test
+        // dodged by padding engineB so the index was out of range: BOTH
+        // engines number their nodes from zero, so a bounds check alone
+        // accepts the foreign handle. The write then lands in a node of an
+        // unrelated type, every dependent fails its cast, and the graph
+        // quietly stops updating instead of crashing.
+        let engineA = CoherenceEngine()
+        let native = engineA.source("hello", label: "native")
+        let derived = engineA.derived(native, label: "derived") { $0.uppercased() }
+
+        let engineB = CoherenceEngine()
+        let foreign = engineB.source(42, label: "foreign")   // also index #0
+
+        XCTAssertEqual(foreign.id.rawValue, native.id.rawValue, "the test is only meaningful if the indices collide")
+
+        XCTAssertNil(engineA.value(of: foreign))
+        XCTAssertEqual(engineA.value(of: foreign, default: -1), -1)
+        XCTAssertThrowsError(try engineA.set(7, for: foreign)) { error in
+            XCTAssertEqual(error as? CoherenceError, .unknownNode(foreign.id))
+        }
+
+        // Nothing leaked into engineA.
+        try engineA.commit()
+        XCTAssertEqual(engineA.value(of: native), "hello")
+        XCTAssertEqual(engineA.value(of: derived), "HELLO")
+        XCTAssertEqual(engineA.typeMismatchCount, 0)
+    }
+
+    func testOutOfRangeForeignHandleIsAlsoRejected() {
         let engineA = CoherenceEngine()
         let engineB = CoherenceEngine()
         _ = engineB.source(0, label: "filler")
-        _ = engineB.source(0, label: "filler2")
         let foreign = engineB.source(99, label: "foreign")
-
-        // Out of range for engineA, which has no nodes at all.
         XCTAssertNil(engineA.value(of: foreign))
-        XCTAssertEqual(engineA.value(of: foreign, default: -1), -1)
-        XCTAssertThrowsError(try engineA.set(1, for: foreign)) { error in
-            XCTAssertEqual(error as? CoherenceError, .unknownNode(foreign.id))
-        }
+        XCTAssertThrowsError(try engineA.set(1, for: foreign))
+    }
+
+    func testNativeHandlesStillWorkAfterIdentityChecking() throws {
+        // Non-vacuity for the two tests above: if `record` rejected everything,
+        // they would both pass and the engine would be useless.
+        let engine = CoherenceEngine()
+        let a = engine.source(1, label: "a")
+        let b = engine.derived(a, label: "b") { Saturating.add($0, 1) }
+        try engine.write(10, to: a)
+        XCTAssertEqual(engine.value(of: b), 11)
     }
 
     func testSinksAreHeldWeakly() throws {

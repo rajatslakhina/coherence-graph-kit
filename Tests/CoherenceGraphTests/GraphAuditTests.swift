@@ -5,6 +5,10 @@ final class GraphAuditTests: XCTestCase {
 
     func testEveryRealInvariantPasses() {
         let findings = GraphAudit.runAll()
+        // Without this, the loop below runs zero times against a gutted
+        // `runAll()` returning `[]` and the test passes having checked nothing.
+        XCTAssertFalse(findings.isEmpty)
+        XCTAssertEqual(findings.count, GraphAudit.expectedInvariants.count)
         for finding in findings where !GraphAudit.expectedFailures.contains(finding.invariant) {
             XCTAssertTrue(finding.passed, "invariant failed: \(finding)")
         }
@@ -33,14 +37,27 @@ final class GraphAuditTests: XCTestCase {
     }
 
     func testIsHealthyRejectsAFailedRealInvariant() {
-        let faked = [
-            AuditFinding(invariant: "topological visit order", passed: false, detail: "fabricated"),
-        ]
+        var faked = GraphAudit.runAll().filter { $0.invariant != "topological visit order" }
+        faked.append(AuditFinding(invariant: "topological visit order", passed: false, detail: "fabricated"))
         XCTAssertFalse(GraphAudit.isHealthy(faked))
+    }
+
+    func testIsHealthyRejectsAnEmptyReport() {
+        // `allSatisfy` on an empty array is `true`, so a gutted `runAll()`
+        // would otherwise look perfectly healthy.
+        XCTAssertFalse(GraphAudit.isHealthy([]))
+    }
+
+    func testIsHealthyRejectsATruncatedReport() {
+        let truncated = Array(GraphAudit.runAll().prefix(3))
+        XCTAssertFalse(GraphAudit.isHealthy(truncated))
     }
 
     func testAuditCoversEveryClaimedInvariant() {
         let names = Set(GraphAudit.runAll().map(\.invariant))
+        // Compared against a literal rather than against
+        // `GraphAudit.expectedInvariants`, so that editing the constant alone
+        // cannot make this test agree with itself.
         let expected: Set<String> = [
             "glitch freedom (CoherenceEngine)",
             "glitch freedom (NaivePropagator)",
@@ -52,6 +69,7 @@ final class GraphAuditTests: XCTestCase {
             "no-op writes publish nothing",
         ]
         XCTAssertEqual(names, expected)
+        XCTAssertEqual(GraphAudit.expectedInvariants, expected)
     }
 
     func testObservationCoherenceUsesGuardedArithmetic() {
@@ -69,5 +87,34 @@ final class GraphAuditTests: XCTestCase {
             )
         )
         XCTAssertTrue(observation.isCoherent)
+    }
+}
+
+/// The demo's headline row text is produced here, not in the SwiftUI layer,
+/// so the thing a reader is promised they will *see* is actually covered by a
+/// test that runs.
+final class GraphStateNarrativeTests: XCTestCase {
+
+    func testNarrativeNamesTheDisagreeingSources() {
+        // The real glitch: subtotal from cart 25, tax still from cart 10.
+        let glitched = GraphState(cart: 25, subtotal: 2500, tax: 80, total: 2580)
+        XCTAssertFalse(glitched.isCoherent)
+        XCTAssertEqual(glitched.subtotalSource, 25)
+        XCTAssertEqual(glitched.taxSource, 10)
+        XCTAssertEqual(
+            glitched.sourceNarrative,
+            "quantity is 25, but subtotal came from 25 and tax came from 10 — the two branches disagree"
+        )
+    }
+
+    func testNarrativeIsPlainForACoherentState() {
+        let good = GraphState(cart: 25, subtotal: 2500, tax: 200, total: 2700)
+        XCTAssertTrue(good.isCoherent)
+        XCTAssertEqual(good.sourceNarrative, "every value computed from quantity 25")
+    }
+
+    func testNarrativeDoesNotTrapOnExtremeValues() {
+        let extreme = GraphState(cart: Int.min, subtotal: Int.min, tax: Int.min, total: Int.min)
+        XCTAssertFalse(extreme.sourceNarrative.isEmpty)
     }
 }
