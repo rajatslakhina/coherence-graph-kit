@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux — clean build (warnings as errors) + tests
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean build with warnings as errors
+        # `swift build` on an up-to-date tree compiles nothing and still prints
+        # "Build complete!", so the .build directory is removed first. The
+        # zero-warnings claim in the README is enforced here, not asserted.
+        run: |
+          set -euo pipefail
+          rm -rf .build
+          swift build -Xswiftc -warnings-as-errors
+
+      - name: Build tests with warnings as errors
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test
+
+  apple:
+    name: macOS — every scheme compiled for iOS Simulator
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build every scheme for an iOS Simulator destination
+        # CoherenceGraphUI is entirely inside `#if canImport(SwiftUI)`, so the
+        # Linux job above compiles none of it. This job is the only thing that
+        # type-checks the SwiftUI module at all, which makes "loop over every
+        # scheme" load-bearing rather than tidy.
+        #
+        # The scheme count is checked explicitly: a `while read` over an empty
+        # list exits 0, so a loop that found nothing would report success —
+        # a green job that built nothing is worse than a red one.
+        #
+        # `generic/platform=iOS Simulator` and not a named device: pinning to
+        # `name=iPhone 16,OS=latest` ties the job to whichever simulator
+        # runtimes happen to be on that day's runner image, and they are not
+        # guaranteed. A compile-only check needs no device to exist.
+        run: |
+          set -euo pipefail
+          xcodebuild -list -json > schemes.json
+          cat schemes.json
+          python3 - <<'PY' > schemes.txt
+          import json
+          data = json.load(open("schemes.json"))
+          container = data.get("workspace") or data.get("project") or {}
+          print("\n".join(container.get("schemes", [])))
+          PY
+          count=$(grep -c . schemes.txt || true)
+          echo "scheme count: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no schemes found — refusing to report success having built nothing"
+            exit 1
+          fi
+          while read -r scheme; do
+            [ -z "$scheme" ] && continue
+            echo "::group::Building $scheme"
+            xcodebuild build \
+              -scheme "$scheme" \
+              -destination 'generic/platform=iOS Simulator'
+            echo "::endgroup::"
+          done < schemes.txt
