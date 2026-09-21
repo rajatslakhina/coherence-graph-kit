@@ -43,9 +43,11 @@ jobs:
 
       - name: Build every scheme for an iOS Simulator destination
         # CoherenceGraphUI is entirely inside `#if canImport(SwiftUI)`, so the
-        # Linux job above compiles none of it. This job is the only thing that
-        # type-checks the SwiftUI module at all, which makes "loop over every
-        # scheme" load-bearing rather than tidy.
+        # Linux job above compiles none of it — and therefore its
+        # warnings-as-errors flag never covered a line of it. This job is the
+        # only thing that type-checks the SwiftUI module at all, so it carries
+        # SWIFT_TREAT_WARNINGS_AS_ERRORS itself; otherwise "zero warnings"
+        # would be a claim about half the package.
         #
         # The scheme count is checked explicitly: a `while read` over an empty
         # list exits 0, so a loop that found nothing would report success —
@@ -76,6 +78,7 @@ jobs:
             echo "::group::Building $scheme"
             xcodebuild build \
               -scheme "$scheme" \
-              -destination 'generic/platform=iOS Simulator'
+              -destination 'generic/platform=iOS Simulator' \
+              SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
             echo "::endgroup::"
           done < schemes.txt
