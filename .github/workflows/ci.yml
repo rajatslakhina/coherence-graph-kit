@@ -13,8 +13,9 @@ jobs:
     container: swift:6.0
     defaults:
       run:
-        # The swift:6.0 image's default shell is dash, where `set -o pipefail`
-        # is an illegal option and the step dies before compiling anything.
+        # Observed, not assumed: without this, the first run of this workflow
+        # failed with `set: Illegal option -o pipefail` before compiling
+        # anything, because the step ran under dash rather than bash.
         shell: bash
     steps:
       - uses: actions/checkout@v4
