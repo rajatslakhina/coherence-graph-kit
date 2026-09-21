@@ -49,6 +49,39 @@ public struct OwnershipRegistry: Sendable, Equatable {
         }
     }
 
+    /// Moves a domain from one stack to the other.
+    ///
+    /// This is the mechanism the migration actually runs on, and it is
+    /// deliberately separate from `claim`. `claim` throwing on a re-claim is
+    /// what makes accidental dual ownership impossible; a migration is not an
+    /// accident, so it gets its own verb, and every transfer is recorded.
+    ///
+    /// Throws if `domain` is unclaimed (there is nothing to transfer) or if
+    /// `from` is not its current owner — so a transfer racing another
+    /// transfer fails rather than silently winning.
+    public mutating func transfer(_ domain: Domain, from: Stack, to: Stack) throws {
+        guard let current = owners[domain] else {
+            throw CoherenceError.domainNotOwned(domain: domain)
+        }
+        guard current == from else {
+            throw CoherenceError.ownershipViolation(domain: domain, owner: current, attemptedBy: from)
+        }
+        owners[domain] = to
+        history.append(Transfer(domain: domain, from: from, to: to))
+    }
+
+    /// One recorded ownership move.
+    public struct Transfer: Hashable, Sendable, CustomStringConvertible {
+        public let domain: Domain
+        public let from: Stack
+        public let to: Stack
+        public var description: String { "\(domain): \(from) -> \(to)" }
+    }
+
+    /// Every transfer, oldest first. A migration you cannot audit afterwards
+    /// is a migration nobody can tell you the state of.
+    public private(set) var history: [Transfer] = []
+
     /// Every claimed domain, sorted by name for stable display and diffing.
     public var claims: [(domain: Domain, owner: Stack)] {
         owners
@@ -57,6 +90,6 @@ public struct OwnershipRegistry: Sendable, Equatable {
     }
 
     public static func == (lhs: OwnershipRegistry, rhs: OwnershipRegistry) -> Bool {
-        lhs.owners == rhs.owners
+        lhs.owners == rhs.owners && lhs.history == rhs.history
     }
 }

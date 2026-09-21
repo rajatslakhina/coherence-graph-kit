@@ -83,13 +83,19 @@ public final class CoherenceEngine {
     private var isPublishing = false
     private var versionCounter: UInt64 = 0
 
+    /// Random per-instance tag stamped into every `NodeID` this engine vends,
+    /// so a handle from another engine is rejected rather than silently
+    /// writing into an unrelated node of an unrelated type.
+    private let identity: UInt64 = .random(in: UInt64.min...UInt64.max)
+
     public let policy: CoherencePolicy
     public private(set) var ownership: OwnershipRegistry
 
-    /// Counts structurally-unreachable type mismatches in the erased core.
-    /// Surfaced rather than ignored: if this is ever non-zero the invariant
-    /// that `Node<V>` is only vended at type `V` has been broken, and a silent
-    /// zero would hide that.
+    /// Counts type mismatches in the erased core.
+    ///
+    /// With engine identity checked on every lookup, a mismatch means a
+    /// derived node's inputs did not match the types it was registered with.
+    /// Surfaced rather than swallowed: a silent zero would hide it.
     public private(set) var typeMismatchCount = 0
 
     /// Order in which nodes were visited by the most recent transaction.
@@ -99,6 +105,14 @@ public final class CoherenceEngine {
     /// How many times each node was recomputed in the most recent transaction.
     /// Consumed by `GraphAudit` to prove exactly-once recomputation.
     public private(set) var lastRecomputeCounts: [NodeID: Int] = [:]
+
+    /// Every snapshot published by the most recent `commit()`, in order.
+    ///
+    /// `commit()` returns only the last one, which is what a caller usually
+    /// wants — but a sink cascade publishes several, and a facade that reports
+    /// only the final state silently collapses exactly the intermediate
+    /// publications this package exists to reason about.
+    public private(set) var snapshotsFromLastCommit: [CoherenceSnapshot] = []
 
     public init(policy: CoherencePolicy = .default, ownership: OwnershipRegistry = OwnershipRegistry()) {
         self.policy = policy
@@ -112,12 +126,12 @@ public final class CoherenceEngine {
     // MARK: - Bounds-checked access
 
     private func record(_ id: NodeID) -> NodeRecord? {
-        guard nodes.indices.contains(id.rawValue) else { return nil }
+        guard id.engine == identity, nodes.indices.contains(id.rawValue) else { return nil }
         return nodes[id.rawValue]
     }
 
     private func mutate(_ id: NodeID, _ body: (inout NodeRecord) -> Void) {
-        guard nodes.indices.contains(id.rawValue) else { return }
+        guard id.engine == identity, nodes.indices.contains(id.rawValue) else { return }
         body(&nodes[id.rawValue])
     }
 
@@ -133,7 +147,7 @@ public final class CoherenceEngine {
     public func inputs(of id: NodeID) -> [NodeID] { record(id)?.inputs ?? [] }
 
     /// Every node id, in registration order.
-    public var allNodes: [NodeID] { nodes.indices.map { NodeID(rawValue: $0) } }
+    public var allNodes: [NodeID] { nodes.indices.map { NodeID(engine: identity, rawValue: $0) } }
 
     // MARK: - Registration
 
@@ -144,7 +158,7 @@ public final class CoherenceEngine {
         domain: Domain? = nil,
         label: String = ""
     ) -> Node<V> {
-        let id = NodeID(rawValue: nodes.count)
+        let id = NodeID(engine: identity, rawValue: nodes.count)
         nodes.append(
             NodeRecord(
                 value: initial,
@@ -212,7 +226,7 @@ public final class CoherenceEngine {
         as _: V.Type,
         _ body: @escaping ([any Sendable]) -> V?
     ) -> Node<V> {
-        let id = NodeID(rawValue: nodes.count)
+        let id = NodeID(engine: identity, rawValue: nodes.count)
         let erased: ([any Sendable]) -> (any Sendable)? = { values in body(values) }
         nodes.append(
             NodeRecord(
@@ -319,6 +333,11 @@ public final class CoherenceEngine {
         try ownership.claim(domain, for: stack)
     }
 
+    /// Moves a domain from one stack to the other, recording the move.
+    public func transferDomain(_ domain: Domain, from: Stack, to: Stack) throws {
+        try ownership.transfer(domain, from: from, to: to)
+    }
+
     // MARK: - Cycle-path test hook
 
     /// Adds a dependency edge directly, bypassing registration.
@@ -364,6 +383,7 @@ public final class CoherenceEngine {
         }
         var depth = 0
         var last: CoherenceSnapshot?
+        snapshotsFromLastCommit.removeAll(keepingCapacity: true)
         while !dirty.isEmpty {
             depth += 1
             if depth > policy.maxCascadeDepth {
@@ -373,6 +393,7 @@ public final class CoherenceEngine {
             }
             guard let snapshot = try runTransaction(cascadeDepth: depth) else { continue }
             last = snapshot
+            snapshotsFromLastCommit.append(snapshot)
             publish(snapshot)
         }
         return last

@@ -20,7 +20,8 @@ public final class CoherenceStore {
 
     public let engine: CoherenceEngine
 
-    /// Invoked after every committed transaction.
+    /// Invoked once per committed transaction — including every transaction of
+    /// a sink-write cascade, not just the last one.
     ///
     /// Deliberately a callback rather than a registered `CoherenceSink`: the
     /// engine publishes synchronously inside the main-actor call that caused
@@ -50,7 +51,13 @@ public final class CoherenceStore {
     @discardableResult
     public func commit() throws -> CoherenceSnapshot? {
         let snapshot = try engine.commit()
-        if let snapshot { onCommit?(snapshot) }
+        // Replaying `snapshotsFromLastCommit` rather than firing once with the
+        // return value: `engine.commit()` runs the whole cascade and returns
+        // only the final snapshot, so a facade that forwarded just that would
+        // hide every intermediate publication.
+        for published in engine.snapshotsFromLastCommit {
+            onCommit?(published)
+        }
         return snapshot
     }
 

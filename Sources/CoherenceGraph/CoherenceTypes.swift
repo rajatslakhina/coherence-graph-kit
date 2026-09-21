@@ -7,8 +7,24 @@
 /// engine that created it, which is what lets every lookup be bounds-checked
 /// against that engine rather than trusted.
 public struct NodeID: Hashable, Sendable, CustomStringConvertible {
+    /// Identity of the engine that vended this id.
+    ///
+    /// Without it, a handle from a *different* engine whose index happens to
+    /// be in range is silently accepted: the write lands in a node of an
+    /// unrelated type, every dependent then fails its cast, and the graph
+    /// quietly stops updating instead of crashing. Bounds-checking alone does
+    /// not catch that, because both engines number their nodes from zero.
+    ///
+    /// A per-instance random value rather than `ObjectIdentifier`: an address
+    /// can be reused after an engine is deallocated, and a stale handle would
+    /// then match a brand-new engine. A random 64-bit tag needs no global
+    /// counter, no synchronisation, and survives deallocation.
+    @usableFromInline let engine: UInt64
     @usableFromInline let rawValue: Int
-    @usableFromInline init(rawValue: Int) { self.rawValue = rawValue }
+    @usableFromInline init(engine: UInt64, rawValue: Int) {
+        self.engine = engine
+        self.rawValue = rawValue
+    }
     public var description: String { "#\(rawValue)" }
 }
 
@@ -57,7 +73,9 @@ public enum CoherenceError: Error, Equatable, CustomStringConvertible {
     case ownershipViolation(domain: Domain, owner: Stack, attemptedBy: Stack)
     /// A domain was claimed by a second stack.
     case domainAlreadyOwned(domain: Domain, owner: Stack)
-    /// A handle from a different engine was passed in.
+    /// A transfer was attempted for a domain nobody owns.
+    case domainNotOwned(domain: Domain)
+    /// The handle was not vended by this engine, or its index is out of range.
     case unknownNode(NodeID)
 
     public var description: String {
@@ -70,8 +88,10 @@ public enum CoherenceError: Error, Equatable, CustomStringConvertible {
             return "\(attemptedBy) wrote '\(domain)', which is owned by \(owner)"
         case .domainAlreadyOwned(let domain, let owner):
             return "'\(domain)' is already owned by \(owner)"
+        case .domainNotOwned(let domain):
+            return "'\(domain)' is not owned by any stack, so there is nothing to transfer"
         case .unknownNode(let id):
-            return "node \(id) does not belong to this engine"
+            return "node \(id) was not vended by this engine"
         }
     }
 }

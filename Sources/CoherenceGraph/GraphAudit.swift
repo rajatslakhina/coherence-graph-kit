@@ -47,6 +47,26 @@ public struct GraphState: Equatable, Sendable, CustomStringConvertible {
         "cart=\(cart) subtotal=\(subtotal) tax=\(tax) total=\(total)"
             + (isCoherent ? "" : "  <- INCOHERENT")
     }
+
+    /// The quantity `subtotal` was actually computed from.
+    public var subtotalSource: Int { Saturating.divide(subtotal, Self.unitPrice) }
+
+    /// The quantity `tax` was actually computed from.
+    public var taxSource: Int { Saturating.divide(tax, Self.unitTax) }
+
+    /// Plain-language account of which quantity each value came from.
+    ///
+    /// This exists because the three derived numbers alone look *fine* in the
+    /// glitched state — 2500 + 80 really is 2580 — so a UI that renders only
+    /// them communicates nothing but a red badge. Naming the disagreeing
+    /// sources is what makes the defect visible rather than asserted.
+    public var sourceNarrative: String {
+        if isCoherent {
+            return "every value computed from quantity \(cart)"
+        }
+        return "quantity is \(cart), but subtotal came from \(subtotalSource) "
+            + "and tax came from \(taxSource) — the two branches disagree"
+    }
 }
 
 /// Builds the diamond `cart -> (subtotal, tax) -> total` and reports every
@@ -324,12 +344,25 @@ public enum GraphAudit {
         var ownerWriteAllowed = true
         do { try registry.validateWrite(to: cartDomain, by: .legacyUIKit) } catch { ownerWriteAllowed = false }
 
+        // A migration moves domains deliberately. Transfer must succeed from
+        // the real owner, fail from a non-owner, and be recorded.
+        var transferSucceeded = true
+        do { try registry.transfer(cartDomain, from: .legacyUIKit, to: .swiftUI) } catch { transferSucceeded = false }
+        var staleTransferRejected = false
+        do { try registry.transfer(cartDomain, from: .legacyUIKit, to: .swiftUI) } catch { staleTransferRejected = true }
+        let recorded = registry.history.count == 1
+        let ownerMoved = registry.owner(of: cartDomain) == .swiftUI
+
         let passed = secondClaimRejected && foreignWriteRejected && ownerWriteAllowed
+            && transferSucceeded && staleTransferRejected && recorded && ownerMoved
         return AuditFinding(
             invariant: "single-writer ownership",
             passed: passed,
             detail: "second claim rejected: \(secondClaimRejected); "
-                + "non-owner write rejected: \(foreignWriteRejected); owner write allowed: \(ownerWriteAllowed)"
+                + "non-owner write rejected: \(foreignWriteRejected); owner write allowed: \(ownerWriteAllowed); "
+                + "transfer by owner accepted: \(transferSucceeded); repeat transfer by stale owner rejected: "
+                + "\(staleTransferRejected); transfers recorded: \(registry.history.count); "
+                + "owner is now \(registry.owner(of: cartDomain).map(String.init(describing:)) ?? "nobody")"
         )
     }
 
@@ -371,11 +404,36 @@ public enum GraphAudit {
     /// the deliberately broken control implementation.
     public static let expectedFailures: Set<String> = ["glitch freedom (NaivePropagator)"]
 
-    /// True when every check behaved as designed: all real invariants held, and
-    /// the control group still fails.
+    /// Every invariant `runAll()` is expected to produce.
+    ///
+    /// Named explicitly so a truncated or empty report is a failure rather
+    /// than a pass: `allSatisfy` on an empty array is `true`, which would make
+    /// a gutted `runAll()` look perfectly healthy.
+    public static let expectedInvariants: Set<String> = [
+        "glitch freedom (CoherenceEngine)",
+        "glitch freedom (NaivePropagator)",
+        "exactly-once recompute",
+        "topological visit order",
+        "cycle detection + rollback",
+        "bounded sink cascade",
+        "single-writer ownership",
+        "no-op writes publish nothing",
+    ]
+
+    /// True when every check behaved as designed: the report is complete, all
+    /// real invariants held, and the control group still fails.
     public static func isHealthy(_ findings: [AuditFinding]) -> Bool {
-        findings.allSatisfy { finding in
+        guard Set(findings.map(\.invariant)) == expectedInvariants else { return false }
+        return findings.allSatisfy { finding in
             expectedFailures.contains(finding.invariant) ? !finding.passed : finding.passed
         }
+    }
+
+    /// The report as text, exactly as the README quotes it.
+    ///
+    /// Exists so the block in the README is reproducible rather than
+    /// hand-typed: `swift test --filter testPrintAuditReport` prints this.
+    public static func report(_ findings: [AuditFinding] = runAll()) -> String {
+        findings.map(\.description).joined(separator: "\n")
     }
 }
