@@ -70,14 +70,14 @@ public struct CoherenceDemoView: View {
                         .font(.title2)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.cart <= Self.quantityBounds.lowerBound)
+                .disabled(model.cart <= CoherenceDemoModel.quantityBounds.lowerBound)
 
                 Slider(
                     value: Binding(
                         get: { Double(model.cart) },
-                        set: { model.setCart(Quantity.fromSlider($0, bounds: Self.quantityBounds)) }
+                        set: { model.setCart(Quantity.fromSlider($0, bounds: CoherenceDemoModel.quantityBounds)) }
                     ),
-                    in: Double(Self.quantityBounds.lowerBound)...Double(Self.quantityBounds.upperBound),
+                    in: Double(CoherenceDemoModel.quantityBounds.lowerBound)...Double(CoherenceDemoModel.quantityBounds.upperBound),
                     step: 1
                 )
                 .accessibilityLabel("Quantity")
@@ -90,7 +90,7 @@ public struct CoherenceDemoView: View {
                         .font(.title2)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.cart >= Self.quantityBounds.upperBound)
+                .disabled(model.cart >= CoherenceDemoModel.quantityBounds.upperBound)
             }
         }
     }
@@ -304,10 +304,6 @@ public struct CoherenceDemoView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Constants
-
-    /// Range the quantity control is bound to.
-    static let quantityBounds = 0...99
 }
 
 #Preview {

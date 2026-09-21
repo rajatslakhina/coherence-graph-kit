@@ -13,10 +13,6 @@ import CoherenceGraph
 @Observable
 public final class CoherenceDemoModel {
 
-    /// Every state the coherent engine made visible, newest last.
-    public private(set) var coherentLog: [GraphState] = []
-    /// Every state the naive propagator made visible, newest last.
-    public private(set) var naiveLog: [GraphState] = []
     /// States published by the most recent write only. This is the comparison
     /// that matters: one write, two implementations, different numbers of
     /// observable states.
@@ -60,17 +56,29 @@ public final class CoherenceDemoModel {
     /// The domain whose single writer is declared below.
     public static let cartDomain = Domain("cart")
 
+    /// The only definition of the quantity range.
+    ///
+    /// The view binds its slider to this rather than repeating `0...99`. Two
+    /// copies of a bound in the demo whose entire thesis is that two sources
+    /// of truth is the bug would be an unforced own goal.
+    public static let quantityBounds = 0...99
+
     public init(policy: CoherencePolicy, initialCart: Int = 3) {
         // Clamped so a caller-supplied value can never drive the demo into an
         // out-of-range stepper state.
-        let seed = max(0, min(initialCart, 99))
+        let seed = min(max(initialCart, Self.quantityBounds.lowerBound), Self.quantityBounds.upperBound)
         cart = seed
 
         store = CoherenceStore(policy: policy)
         let engine = store.engine
         // During a migration this slice of state has exactly one writer. A
         // write attributed to the other stack is rejected — see `attemptRogueWrite`.
-        try? engine.claimDomain(Self.cartDomain, for: .swiftUI)
+        var claimFailure: String?
+        do {
+            try engine.claimDomain(Self.cartDomain, for: .swiftUI)
+        } catch {
+            claimFailure = String(describing: error)
+        }
         cartNode = engine.source(seed, domain: Self.cartDomain, label: "cart")
         subtotalNode = engine.derived(cartNode, label: "subtotal") {
             Saturating.multiply($0, GraphState.unitPrice)
@@ -103,9 +111,10 @@ public final class CoherenceDemoModel {
         _ = apex
 
         findings = GraphAudit.runAll()
+        lastError = claimFailure
         // Drive one write immediately so both panels show real published
         // states before the reader touches anything.
-        setCart(seed + 1)
+        setCart(Saturating.add(seed, 1))
     }
 
     /// Current coherent-engine reading.
@@ -120,7 +129,7 @@ public final class CoherenceDemoModel {
 
     /// Writes the same value into both graphs.
     public func setCart(_ newValue: Int) {
-        let clamped = max(0, min(newValue, 99))
+        let clamped = min(max(newValue, Self.quantityBounds.lowerBound), Self.quantityBounds.upperBound)
         cart = clamped
         lastError = nil
         lastWriteWasNoOp = false
@@ -183,26 +192,24 @@ public final class CoherenceDemoModel {
     }
 
     private func recordCoherent() {
-        let observation = current
-        coherentLog.append(observation)
-        lastWriteCoherent.append(observation)
-        trim(&coherentLog)
+        lastWriteCoherent.append(current)
+        trim(&lastWriteCoherent)
     }
 
     /// Turns the propagator's recorded writes into the states an observer of
-    /// the apex would have seen, using each write's own snapshot.
+    /// the apex would have seen, using the same core function the test suite
+    /// exercises rather than a private copy of it.
     private func drainNaiveLog() {
-        for update in naive.updateLog where update.index == naiveTotal {
-            let observation = GraphState(
-                cart: update.value(at: naiveCart) ?? 0,
-                subtotal: update.value(at: naiveSubtotal) ?? 0,
-                tax: update.value(at: naiveTax) ?? 0,
-                total: update.value(at: naiveTotal) ?? 0
+        lastWriteNaive.append(
+            contentsOf: GraphState.statesObservedAtApex(
+                in: naive.updateLog,
+                cart: naiveCart,
+                subtotal: naiveSubtotal,
+                tax: naiveTax,
+                apex: naiveTotal
             )
-            naiveLog.append(observation)
-            lastWriteNaive.append(observation)
-        }
-        trim(&naiveLog)
+        )
+        trim(&lastWriteNaive)
     }
 
     /// Bounded: an unbounded log in a long-lived view model is a leak.
