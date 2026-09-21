@@ -11,6 +11,11 @@ jobs:
     name: Linux — clean build (warnings as errors) + tests
     runs-on: ubuntu-latest
     container: swift:6.0
+    defaults:
+      run:
+        # The swift:6.0 image's default shell is dash, where `set -o pipefail`
+        # is an illegal option and the step dies before compiling anything.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
