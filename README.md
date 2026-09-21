@@ -81,21 +81,24 @@ The same idea runs through the test suite. `testCycleDetectionIsNotVacuous` buil
 
 ## Executed invariants
 
-`GraphAudit.runAll()` does not assert; it builds graphs, drives them, and reports what happened:
+`GraphAudit.runAll()` does not assert; it builds graphs, drives them, and reports what happened. This block is the literal output of `GraphAudit.report()` — reproduce it with:
 
 ```
-PASS  glitch freedom (CoherenceEngine)  — all 1 published state(s) were a consistent function of the source
-FAIL  glitch freedom (NaivePropagator)  — 1 of 2 published state(s) were not a consistent function of the
-                                           source (first: cart=25 subtotal=2500 tax=80 total=2580  <- INCOHERENT)
-PASS  exactly-once recompute            — 3 derived node(s) recomputed, max recomputes for any one node = 1
-PASS  topological visit order           — visit order cart -> subtotal -> tax -> total respects every edge
-PASS  cycle detection + rollback        — threw cycle detected among #1, #2; values restored to a=1 b=2 c=3
-PASS  bounded sink cascade              — a sink that writes on every commit stopped after 4 transactions
-PASS  single-writer ownership           — second claim rejected: true; non-owner write rejected: true
-PASS  no-op writes publish nothing      — writing the current value produced no snapshot
+swift test --filter testPrintAuditReport
 ```
 
-The `FAIL` row is the control group and is supposed to be there.
+```
+PASS  glitch freedom (CoherenceEngine) — CoherenceEngine: all 1 published state(s) were a consistent function of the source
+FAIL  glitch freedom (NaivePropagator) — NaivePropagator: 1 of 2 published state(s) were not a consistent function of the source (first: cart=25 subtotal=2500 tax=80 total=2580  <- INCOHERENT)
+PASS  exactly-once recompute — 3 derived node(s) recomputed, max recomputes for any one node = 1 (a depth-first push recomputes the diamond apex twice)
+PASS  topological visit order — visit order cart -> subtotal -> tax -> total respects every edge
+PASS  cycle detection + rollback — threw cycle detected among #1, #2; values restored to a=1 b=2 c=3 (pre-transaction a=1 b=2 c=3)
+PASS  bounded sink cascade — a sink that writes on every commit stopped after 4 transactions with a typed error instead of recursing
+PASS  single-writer ownership — second claim rejected: true; non-owner write rejected: true; owner write allowed: true; transfer by owner accepted: true; repeat transfer by stale owner rejected: true; transfers recorded: 1; owner is now SwiftUI
+PASS  no-op writes publish nothing — writing the current value produced no snapshot; writing a new value produced a snapshot
+```
+
+The `FAIL` row is the control group and is supposed to be there. `GraphAudit.isHealthy(_:)` returns `true` only when the report is **complete** (an empty or truncated report is a failure, because `allSatisfy` on an empty array is vacuously `true`), every real invariant held, and the control group still failed.
 
 ## Usage
 
@@ -110,14 +113,17 @@ let tax      = engine.derived(cart, label: "tax")      { Saturating.multiply($0,
 let total    = engine.derived(subtotal, tax, label: "total") { Saturating.add($0, $1) }
 
 try engine.write(25, to: cart)
-engine.value(of: total)               // 2700 — and no observer ever saw 2580
+engine.value(of: total)               // Optional(2700) — and no observer ever saw 2580
 ```
 
 Batching several writes into one publish:
 
 ```swift
+let taxRate = engine.source(8, label: "taxRate")          // percent, in whole points
+let tax     = engine.derived(cart, taxRate, label: "tax") { Saturating.multiply($0, $1) }
+
 try engine.set(25, for: cart)
-try engine.set(0.08, for: rate)
+try engine.set(9, for: taxRate)
 try engine.commit()                   // one recompute pass, one notification
 ```
 
@@ -134,16 +140,51 @@ try engine.set(1, for: cart, from: .legacyUIKit)
 ### Installation
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/coherence-graph-kit.git", from: "1.0.0")
+.package(url: "https://github.com/rajatslakhina/coherence-graph-kit.git", from: "2.0.0")
 ```
+
+### Running it yourself
+
+```bash
+git clone https://github.com/rajatslakhina/coherence-graph-kit.git
+cd coherence-graph-kit
+rm -rf .build && swift build -Xswiftc -warnings-as-errors   # zero warnings
+swift test                                                   # 69 tests
+swift test --filter testPrintAuditReport                     # prints the block above
+```
+
+Linux or macOS both work for the library; `CoherenceGraphUI` needs an Apple SDK, and the [demo app](#demo-app) is the way to see it.
 
 ## Demo app
 
-Demo app: *(added after the companion repo is pushed — see below)*
+**[coherence-graph-demo-app](https://github.com/rajatslakhina/coherence-graph-demo-app)** — a runnable iOS app that builds both graphs side by side and lets you watch the naive one publish a cart that never existed. It consumes this package as a *remote* `XCRemoteSwiftPackageReference` pinned `upToNextMajorVersion` from a released tag, never a local path and never `branch = main`.
+
+This repository deliberately contains **no app target of any kind** — no executable product, no `.xcodeproj`. The runnable app lives in its own repository and depends on this one exactly the way any other consumer would.
 
 ## Verification
 
-*(written after CI has actually reported — see below)*
+- **Clean `swift build -Xswiftc -warnings-as-errors`, zero warnings.** `.build` is removed first, because `swift build` on an up-to-date tree compiles nothing and still prints "Build complete!" — which is evidence of nothing. The claim is machine-enforced in CI, not asserted here.
+- **69 XCTest tests, 0 failures** on Swift 6.0.3.
+- **CI: [Actions](https://github.com/rajatslakhina/coherence-graph-kit/actions).** The Linux job re-runs the clean warnings-as-errors build, builds the tests under the same flag, and runs the suite. The macOS job compiles **every** scheme for `generic/platform=iOS Simulator` — and that job is load-bearing rather than tidy, because `CoherenceGraphUI` sits entirely inside `#if canImport(SwiftUI)` and the Linux job therefore compiles none of it. The scheme count is checked explicitly: a `while read` over an empty list exits 0, and a green job that built nothing is worse than a red one.
+- **The app was never run on a Simulator, and no screenshots exist in either repository.** This package was built by an unattended scheduled job that is refused interactive control of the machine. "Compiles for an iOS Simulator destination" is not "ran on a Simulator," and nothing here claims it is.
+
+### What is therefore still untested
+
+The Linux suite covers the engine, the audit, ownership and its transfer history, guarded arithmetic, display formatting and the update log. The SwiftUI layer (`CoherenceDemoView`, `CoherenceDemoModel`) is **compiled** for iOS by the macOS job and by the demo app's own CI, but its runtime behaviour — that the panels actually render two rows against one — has never been observed on a device.
+
+Two things deliberately narrow that gap. `UpdateLogTests` exercises the exact snapshot reconstruction the view model performs. And the logic that would otherwise have hidden inside the view — currency formatting, slider-to-quantity clamping, and the row narrative that names which quantity each value came from — lives in the core module instead, where `DisplayTests` and `GraphStateNarrativeTests` actually run it. What remains untested is SwiftUI layout and wiring, not arithmetic or text.
+
+## Scope, and what this deliberately does not do
+
+Naming the edges is part of the design, not an apology for it.
+
+**No node teardown.** `CoherenceEngine.nodes` only grows; there is no `remove` or `reset`. That is fine for a graph built once at startup and wrong for the thing this README pitches — a long-lived store that screens register derived nodes against as they appear. Adding removal means deciding what happens to a dependent of a removed node, which is a real design question (cascade? orphan? refuse?) and not one to answer by accident. Until it is answered, build graphs whose node set is fixed.
+
+**No UIKit in this repository.** The migration argument is about two propagation engines over one source of truth, and `NaivePropagator` stands in for the legacy one. It is a faithful model of the *propagation* defect — it is not a UIKit view hierarchy, and nothing here renders from UIKit. The "same frame, two answers" scenario is therefore reasoned about here and demonstrated only in the propagation layer.
+
+**No scale claims.** The worked example is four nodes. Commit is `O(affected + edges)` over the dirty cone, which is the right shape, but nothing in this repository benchmarks a large graph, so there is no performance claim to quote.
+
+**Ownership transfer is manual and single-step.** `transfer(_:from:to:)` moves one domain and records it. There is no notion of a staged rollout, a percentage, or an automatic rollback — a migration is a sequence of deliberate human decisions here, and the registry's job is only to make each one explicit and auditable.
 
 ## License
 
